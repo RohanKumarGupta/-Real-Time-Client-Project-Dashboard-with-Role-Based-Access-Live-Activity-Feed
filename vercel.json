@@ -3,5 +3,8 @@
   "buildCommand": "npm run build --prefix client",
   "outputDirectory": "client/dist",
   "installCommand": "npm install --prefix client",
+  "env": {
+    "VITE_API_URL": "https://agency-ops-api.onrender.com"
+  },
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }

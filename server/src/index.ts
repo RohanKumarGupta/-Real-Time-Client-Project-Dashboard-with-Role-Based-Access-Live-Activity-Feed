@@ -13,7 +13,8 @@ import { z } from 'zod';
 const prisma = new PrismaClient();
 const app = express(); const httpServer = createServer(app);
 const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
-const corsOptions = { origin: allowedOrigins, credentials: true };
+const isAllowedOrigin = (origin?: string) => !origin || allowedOrigins.includes(origin) || /^https:\/\/([a-z0-9-]+\.)*vercel\.app$/.test(origin);
+const corsOptions = { origin: (origin: string | undefined, callback: (error: Error | null, allowed?: boolean) => void) => callback(null, isAllowedOrigin(origin)), credentials: true };
 const io = new Server(httpServer, { cors: corsOptions });
 const PORT = Number(process.env.PORT || 4000); const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 type Claims = { id: string; role: Role; name: string };
@@ -21,7 +22,7 @@ type AuthedRequest = Request & { user?: Claims };
 app.use(cors(corsOptions)); app.use(express.json()); app.use(cookieParser());
 const error = (res: Response, status: number, message: string) => res.status(status).json({ error: { message } });
 const signAccess = (user: Claims) => jwt.sign(user, JWT_SECRET, { expiresIn: '15m' });
-const issueSession = (res: Response, user: Claims) => { res.cookie('refreshToken', jwt.sign(user, JWT_SECRET, { expiresIn: '7d' }), { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 7 * 86400000 }); return signAccess(user); };
+const issueSession = (res: Response, user: Claims) => { const production = process.env.NODE_ENV === 'production'; res.cookie('refreshToken', jwt.sign(user, JWT_SECRET, { expiresIn: '7d' }), { httpOnly: true, sameSite: production ? 'none' : 'lax', secure: production, maxAge: 7 * 86400000 }); return signAccess(user); };
 const auth = (roles?: Role[]) => (req: AuthedRequest, res: Response, next: NextFunction) => { try { const token = (req.headers.authorization || '').replace('Bearer ', ''); const user = jwt.verify(token, JWT_SECRET) as Claims; if (roles && !roles.includes(user.role)) return error(res, 403, 'You do not have permission for this action'); req.user = user; next(); } catch { error(res, 401, 'Authentication required'); } };
 const canSeeProject = async (user: Claims, projectId: string) => { if (user.role === Role.ADMIN) return true; if (user.role === Role.PM) return Boolean(await prisma.project.findFirst({ where: { id: projectId, ownerId: user.id } })); return Boolean(await prisma.task.findFirst({ where: { projectId, developerId: user.id } })); };
 
