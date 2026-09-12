@@ -6,7 +6,7 @@
     "db:generate": "npm run prisma:generate --prefix server",
     "db:push": "npm run prisma:push --prefix server",
     "seed": "npm run seed --prefix server",
-    "build": "npm run build --prefix client && npm run build --prefix server"
+    "build": "npm run build --prefix client"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
