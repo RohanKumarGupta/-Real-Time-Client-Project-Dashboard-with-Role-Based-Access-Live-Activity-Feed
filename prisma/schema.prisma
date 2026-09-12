@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+  output = "../server/node_modules/.prisma/client"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+enum Role {
+  ADMIN
+  PM
+  DEVELOPER
+}
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+  OVERDUE
+}
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  name String
+  passwordHash String
+  role Role
+  createdAt DateTime @default(now())
+  projects Project[]
+  tasks Task[]
+  notifications Notification[]
+  activities Activity[]
+}
+model Client {
+  id String @id @default(cuid())
+  name String
+  projects Project[]
+  createdAt DateTime @default(now())
+}
+model Project {
+  id String @id @default(cuid())
+  name String
+  description String?
+  ownerId String
+  owner User @relation(fields: [ownerId], references: [id])
+  clientId String
+  client Client @relation(fields: [clientId], references: [id])
+  tasks Task[]
+  activities Activity[]
+  createdAt DateTime @default(now())
+  @@index([ownerId])
+}
+model Task {
+  id Int @id @default(autoincrement())
+  title String
+  description String
+  priority Priority
+  status TaskStatus
+  dueDate DateTime
+  projectId String
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  developerId String
+  developer User @relation(fields: [developerId], references: [id])
+  activities Activity[]
+  createdAt DateTime @default(now())
+  @@index([developerId, status])
+  @@index([projectId, dueDate])
+}
+model Activity {
+  id Int @id @default(autoincrement())
+  projectId String
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId Int
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actorId String
+  actor User @relation(fields: [actorId], references: [id])
+  fromStatus TaskStatus?
+  toStatus TaskStatus
+  createdAt DateTime @default(now())
+  @@index([projectId, createdAt])
+}
+model Notification {
+  id Int @id @default(autoincrement())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title String
+  body String
+  readAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, readAt])
+}

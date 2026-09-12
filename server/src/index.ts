@@ -1,0 +1,41 @@
+import 'dotenv/config';
+import express, { NextFunction, Request, Response } from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import cron from 'node-cron';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import { PrismaClient, Role, TaskStatus } from '@prisma/client';
+import { z } from 'zod';
+
+const prisma = new PrismaClient();
+const app = express(); const httpServer = createServer(app);
+const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_URL, credentials: true } });
+const PORT = Number(process.env.PORT || 4000); const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+type Claims = { id: string; role: Role; name: string };
+type AuthedRequest = Request & { user?: Claims };
+app.use(cors({ origin: process.env.CLIENT_URL, credentials: true })); app.use(express.json()); app.use(cookieParser());
+const error = (res: Response, status: number, message: string) => res.status(status).json({ error: { message } });
+const signAccess = (user: Claims) => jwt.sign(user, JWT_SECRET, { expiresIn: '15m' });
+const issueSession = (res: Response, user: Claims) => { res.cookie('refreshToken', jwt.sign(user, JWT_SECRET, { expiresIn: '7d' }), { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 7 * 86400000 }); return signAccess(user); };
+const auth = (roles?: Role[]) => (req: AuthedRequest, res: Response, next: NextFunction) => { try { const token = (req.headers.authorization || '').replace('Bearer ', ''); const user = jwt.verify(token, JWT_SECRET) as Claims; if (roles && !roles.includes(user.role)) return error(res, 403, 'You do not have permission for this action'); req.user = user; next(); } catch { error(res, 401, 'Authentication required'); } };
+const canSeeProject = async (user: Claims, projectId: string) => { if (user.role === Role.ADMIN) return true; if (user.role === Role.PM) return Boolean(await prisma.project.findFirst({ where: { id: projectId, ownerId: user.id } })); return Boolean(await prisma.task.findFirst({ where: { projectId, developerId: user.id } })); };
+
+app.get('/health', (_req, res) => res.json({ ok: true }));
+app.post('/api/auth/login', async (req, res) => { const parsed = z.object({ email: z.string().email(), password: z.string().min(8) }).safeParse(req.body); if (!parsed.success) return error(res, 400, 'Valid email and password are required'); const user = await prisma.user.findUnique({ where: { email: parsed.data.email } }); if (!user || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) return error(res, 401, 'Invalid credentials'); const claims = { id: user.id, role: user.role, name: user.name }; res.json({ accessToken: issueSession(res, claims), user: claims }); });
+app.post('/api/auth/refresh', (req, res) => { try { const claims = jwt.verify(req.cookies.refreshToken, JWT_SECRET) as Claims; res.json({ accessToken: signAccess(claims) }); } catch { error(res, 401, 'Refresh token expired'); } });
+app.post('/api/auth/logout', (_req, res) => { res.clearCookie('refreshToken'); res.json({ ok: true }); });
+app.get('/api/dashboard', auth(), async (req: AuthedRequest, res) => { const user = req.user!; const projectWhere = user.role === Role.ADMIN ? {} : user.role === Role.PM ? { ownerId: user.id } : { tasks: { some: { developerId: user.id } } }; const taskWhere = user.role === Role.ADMIN ? {} : user.role === Role.PM ? { project: { ownerId: user.id } } : { developerId: user.id }; const [projects, tasks, overdue, notifications] = await Promise.all([prisma.project.count({ where: projectWhere }), prisma.task.groupBy({ by: ['status'], where: taskWhere, _count: true }), prisma.task.count({ where: { ...taskWhere, status: TaskStatus.OVERDUE } }), prisma.notification.count({ where: { userId: user.id, readAt: null } })]); res.json({ projects, tasks, overdue, unreadNotifications: notifications }); });
+app.get('/api/projects', auth(), async (req: AuthedRequest, res) => { const user = req.user!; const projects = await prisma.project.findMany({ where: user.role === Role.ADMIN ? {} : user.role === Role.PM ? { ownerId: user.id } : { tasks: { some: { developerId: user.id } } }, include: { client: true, owner: { select: { name: true } }, tasks: { where: user.role === Role.DEVELOPER ? { developerId: user.id } : {}, include: { developer: { select: { name: true } } }, orderBy: [{ priority: 'desc' }, { dueDate: 'asc' }] } }, orderBy: { createdAt: 'desc' } }); res.json(projects); });
+app.get('/api/projects/:id/activity', auth(), async (req: AuthedRequest, res) => { const projectId = String(req.params.id); if (!(await canSeeProject(req.user!, projectId))) return error(res, 403, 'Project access denied'); const events = await prisma.activity.findMany({ where: { projectId }, include: { actor: { select: { name: true } }, task: { select: { title: true } } }, orderBy: { createdAt: 'desc' }, take: 20 }); res.json(events); });
+app.patch('/api/tasks/:id/status', auth(), async (req: AuthedRequest, res) => { const parsed = z.object({ status: z.nativeEnum(TaskStatus) }).safeParse(req.body); if (!parsed.success) return error(res, 400, 'Invalid task status'); const task = await prisma.task.findUnique({ where: { id: Number(req.params.id) }, include: { project: true } }); if (!task) return error(res, 404, 'Task not found'); const user = req.user!; if (user.role === Role.DEVELOPER && task.developerId !== user.id) return error(res, 403, 'You can only update assigned tasks'); if (user.role === Role.PM && task.project.ownerId !== user.id) return error(res, 403, 'You can only update your projects'); const updated = await prisma.$transaction(async tx => { const next = await tx.task.update({ where: { id: task.id }, data: { status: parsed.data.status } }); await tx.activity.create({ data: { projectId: task.projectId, taskId: task.id, actorId: user.id, fromStatus: task.status, toStatus: parsed.data.status } }); if (parsed.data.status === TaskStatus.IN_REVIEW && user.role === Role.DEVELOPER) await tx.notification.create({ data: { userId: task.project.ownerId, title: 'Task ready for review', body: `${user.name} moved ${task.title} to In Review` } }); return next; }); const payload = { taskId: updated.id, projectId: task.projectId, actor: user.name, from: task.status, to: updated.status, at: new Date().toISOString(), taskTitle: task.title }; io.to(`project:${task.projectId}`).emit('activity:new', payload); io.to(`user:${task.project.ownerId}`).emit('notifications:changed'); res.json(updated); });
+app.get('/api/notifications', auth(), async (req: AuthedRequest, res) => res.json(await prisma.notification.findMany({ where: { userId: req.user!.id }, orderBy: { createdAt: 'desc' }, take: 30 })));
+app.patch('/api/notifications/read', auth(), async (req: AuthedRequest, res) => { await prisma.notification.updateMany({ where: { userId: req.user!.id, readAt: null }, data: { readAt: new Date() } }); res.json({ ok: true }); });
+
+io.use((socket, next) => { try { socket.data.user = jwt.verify(socket.handshake.auth?.token, JWT_SECRET) as Claims; next(); } catch { next(new Error('Unauthorized')); } });
+io.on('connection', async socket => { const user = socket.data.user as Claims; socket.join(`user:${user.id}`); const projects = await prisma.project.findMany({ where: user.role === Role.ADMIN ? {} : user.role === Role.PM ? { ownerId: user.id } : { tasks: { some: { developerId: user.id } } }, select: { id: true } }); projects.forEach(project => socket.join(`project:${project.id}`)); socket.on('presence:join', () => io.emit('presence:count', io.engine.clientsCount)); socket.on('disconnect', () => io.emit('presence:count', io.engine.clientsCount)); });
+cron.schedule('0 * * * *', async () => { const overdue = await prisma.task.updateMany({ where: { dueDate: { lt: new Date() }, status: { notIn: [TaskStatus.DONE, TaskStatus.OVERDUE] } }, data: { status: TaskStatus.OVERDUE } }); if (overdue.count) console.log(`Flagged ${overdue.count} overdue tasks`); });
+app.use((_req, res) => error(res, 404, 'Route not found')); app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => error(res, 500, 'Unexpected server error'));
+httpServer.listen(PORT, () => console.log(`API listening on http://localhost:${PORT}`));
