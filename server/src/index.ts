@@ -12,11 +12,13 @@ import { z } from 'zod';
 
 const prisma = new PrismaClient();
 const app = express(); const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_URL, credentials: true } });
+const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
+const corsOptions = { origin: allowedOrigins, credentials: true };
+const io = new Server(httpServer, { cors: corsOptions });
 const PORT = Number(process.env.PORT || 4000); const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 type Claims = { id: string; role: Role; name: string };
 type AuthedRequest = Request & { user?: Claims };
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true })); app.use(express.json()); app.use(cookieParser());
+app.use(cors(corsOptions)); app.use(express.json()); app.use(cookieParser());
 const error = (res: Response, status: number, message: string) => res.status(status).json({ error: { message } });
 const signAccess = (user: Claims) => jwt.sign(user, JWT_SECRET, { expiresIn: '15m' });
 const issueSession = (res: Response, user: Claims) => { res.cookie('refreshToken', jwt.sign(user, JWT_SECRET, { expiresIn: '7d' }), { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 7 * 86400000 }); return signAccess(user); };

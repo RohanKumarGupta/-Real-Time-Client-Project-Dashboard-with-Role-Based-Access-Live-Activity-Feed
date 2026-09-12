@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: agency-ops-api
+    runtime: node
+    buildCommand: npm install; npm install --prefix server; npm run db:generate; npm run db:push; npm run build --prefix server
+    startCommand: npm run start --prefix server
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agency-ops-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_URL
+        sync: false
+databases:
+  - name: agency-ops-db
